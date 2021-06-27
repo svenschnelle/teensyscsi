@@ -535,17 +535,36 @@ void scsi_initialize(void)
 	scsi_setup_ports();
 }
 
+static void scsi_uas_request(struct uas_command_iu *iu, int len)
+{
+	struct scsi_xfer xfer = { 0 };
+
+	if (len < sizeof(struct uas_command_iu)) {
+		printf("%s: short request (%d bytes)\n", __func__, len);
+		return;
+	}
+	printf("ID %d, len %d, lun %d, tag %d, prio_attr %x, cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	       iu->iu_id, iu->len, iu->lun[0], (iu->tag >> 8) | ((iu->tag & 0xff) << 8), iu->prio_attr,
+	       iu->cdb[0], iu->cdb[1], iu->cdb[2], iu->cdb[3], iu->cdb[4],
+	       iu->cdb[5], iu->cdb[6], iu->cdb[7], iu->cdb[8], iu->cdb[9]);
+
+	xfer.cdb = iu->cdb;
+	xfer.id = 5; // XXX
+	xfer.tag = iu->tag;
+
+	scsi_transfer(&xfer);
+//	printf("request done\n");
+}
+
 void usb_msc_loop(void)
 {
 	transfer_t *t;
 	while (1) {
-		struct uas_command_iu iu;
 		t = get_frame(&rx_cmd_busy_list);
 		int len = transfer_length(t);
 
 		if (len > 0) {
-			memcpy(&iu, transfer_buffer(t), sizeof(iu));
-			scsi_uas_request(&iu);
+			scsi_uas_request(transfer_buffer(t), len);
 			usb_rx_cmd_ack(t);
 
 		} else {
@@ -554,20 +573,4 @@ void usb_msc_loop(void)
 	}
 }
 
-void scsi_uas_request(struct uas_command_iu *iu)
-{
-	struct scsi_xfer xfer = { 0 };
-
-	printf("ID %d, len %d, lun %d, tag %d, prio_attr %x, cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-	       iu->iu_id, iu->len, iu->lun[0], (iu->tag >> 8) | ((iu->tag & 0xff) << 8), iu->prio_attr,
-	       iu->cdb[0], iu->cdb[1], iu->cdb[2], iu->cdb[3], iu->cdb[4],
-	       iu->cdb[5], iu->cdb[6], iu->cdb[7], iu->cdb[8], iu->cdb[9]);
-
-	xfer.cdb = iu->cdb;
-	xfer.id = 3; // XXX
-	xfer.tag = iu->tag;
-
-	scsi_transfer(&xfer);
-//	printf("request done\n");
-}
 

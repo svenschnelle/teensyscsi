@@ -60,7 +60,6 @@ extern "C" {
 #endif
 
 void scsi_initialize(void);
-void scsi_uas_request(struct uas_command_iu *ui);
 void scsi_reset(void);
 int scsi_transfer(struct scsi_xfer *xfer);
 #ifdef __cplusplus
