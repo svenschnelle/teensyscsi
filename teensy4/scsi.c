@@ -240,8 +240,6 @@ static int scsi_select(int id)
 
         digitalWriteFast(SELO_PIN, LOW);
 	delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
-	while(digitalReadFast(REQI_PIN))
-		delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
 	return 0;
 }
 
@@ -485,6 +483,12 @@ static void scsi_handle_phase(struct scsi_xfer *xfer)
 	int phase = scsi_get_phase();
 
 //	printf("%s: %s\n", __func__, phase_names[phase & 7]);
+
+	while(digitalReadFast(REQI_PIN)) {
+		if (digitalReadFast(BSYI_PIN))
+			return;
+		delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
+	}
 
 	switch (phase) {
 	case SCSI_PHASE_DOUT:
