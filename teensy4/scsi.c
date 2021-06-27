@@ -220,7 +220,7 @@ static int scsi_wait_bus_free(void)
 
 static int scsi_select(int id)
 {
-	int i = 250;
+	int i = 250000000 / SCSI_BUS_SETTLE_DELAY;
 
 	digitalWriteFast(SELO_PIN, HIGH);
 	delayNanoseconds(10 * SCSI_BUS_SETTLE_DELAY);
@@ -230,7 +230,7 @@ static int scsi_select(int id)
 	delayNanoseconds(10 * SCSI_BUS_SETTLE_DELAY);
 
         while (i-- > 0 && digitalReadFast(BSYI_PIN))
-		delay(1);
+		delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
 
 	if (i < 0) {
 		printf("select failed\n");
