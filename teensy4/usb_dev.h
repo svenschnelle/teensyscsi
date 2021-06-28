@@ -51,7 +51,8 @@ static inline int transfer_length(transfer_t *t)
 	return rx_packet_size - ((t->status >> 16) & 0x7FFF);
 }
 
-	struct transfer_struct *get_frame(struct transfer_struct **list);
+struct transfer_struct *get_frame(struct transfer_struct **list);
+struct transfer_struct *get_frame_noblock(struct transfer_struct **list);
 void put_frame(struct transfer_struct **list, struct transfer_struct *t);
 
 #ifdef __cplusplus

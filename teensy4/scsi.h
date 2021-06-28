@@ -44,24 +44,39 @@ typedef enum {
 	IU_ID_WRITE_READY = 7,
 } uas_iu_t;
 
+typedef enum {
+	SCSI_MSG_UNKNOWN,
+	SCSI_MSG_IDENTIFY,
+	SCSI_MSG_TAG,
+} scsi_msg_phase_t;
+
 struct scsi_xfer {
 	uint8_t id;
 	uint8_t *cdb;
 	uint8_t status;
 	uint16_t tag;
+	uint8_t outmsgs[16];
+	uint8_t inmsgs[16];
+	scsi_msg_phase_t msgphase;
+	int inmsgcnt;
+	int lun;
+	int abortxfr:1;
+	int retry:1;
 };
 
+#define SCSI_MSG_REJECT 0x07
+#define SCSI_MSG_SIMPLE_TAG 0x20
 static inline uint16_t get_xfer_tag(struct scsi_xfer *xfer)
 {
 	return (xfer->tag >> 8) | ((xfer->tag & 0xff) << 8);
 }
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void scsi_initialize(void);
 void scsi_reset(void);
-int scsi_transfer(struct scsi_xfer *xfer);
 #ifdef __cplusplus
 }
 #endif

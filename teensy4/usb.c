@@ -1,3 +1,4 @@
+#include "imxrt.h"
 #include "usb_dev.h"
 #define USB_DESC_LIST_DEFINE
 #include "usb_desc.h"
@@ -5,6 +6,7 @@
 #include "avr/pgmspace.h"
 #include <string.h>
 #include "debug/printf.h"
+#include "scsi.h"
 
 typedef struct endpoint_struct endpoint_t;
 
@@ -125,6 +127,18 @@ struct transfer_struct *get_frame(struct transfer_struct **list)
 	return ret;
 }
 
+struct transfer_struct *get_frame_noblock(struct transfer_struct **list)
+{
+	struct transfer_struct *ret = NULL;
+	__disable_irq();
+	if (*list) {
+		ret = *list;
+		*list = (*list)->next;
+	}
+	__enable_irq();
+	return ret;
+}
+
 void put_frame(struct transfer_struct **list, struct transfer_struct *t)
 {
 	struct transfer_struct *tmp;
@@ -198,7 +212,7 @@ static void tx_complete(transfer_t *t)
 	put_frame(&tx_free_list, t);
 }
 
-void usb_msc_configure(void)
+static void usb_msc_configure(void)
 {
 	int i;
 
@@ -231,7 +245,6 @@ void usb_msc_configure(void)
 	usb_config_tx(UAS_STAT_ENDPOINT, tx_packet_size, 0, tx_complete);
 	usb_config_tx(UAS_DIN_ENDPOINT, tx_packet_size, 0, tx_complete);
 
-
 	for (i = 0; i < RX_CMD_NUM; i++) {
 		struct transfer_struct *t = rx_cmd_transfer + i;
 		t->pointer0 = 0 * 4096 + (uint32_t)(rx_cmd_buf + i);
@@ -252,6 +265,25 @@ void usb_msc_configure(void)
 
 }
 
+static void usb_flush(void)
+{
+	uint32_t mask = (1 << UAS_DIN_ENDPOINT) | \
+		(1 << UAS_DOUT_ENDPOINT) |	  \
+		(1 << UAS_CMD_ENDPOINT) |	  \
+		(1 << UAS_STAT_ENDPOINT);
+
+	mask |= (mask << 16);
+
+	int i = 0;
+	do {
+		USB1_ENDPTFLUSH |= mask;
+		while(USB1_ENDPTFLUSH & mask);
+	} while((USB1_ENDPTSTATUS & mask) && i++ < 10);
+
+	tx_free_list = NULL;
+	rx_cmd_busy_list = NULL;
+	rx_dout_busy_list = NULL;
+}
 
 static void run_callbacks(endpoint_t *ep)
 {
@@ -360,6 +392,8 @@ static void endpoint0_setup(uint64_t setupdata)
 		USB1_DEVICEADDR = USB_DEVICEADDR_USBADR(setup.wValue) | USB_DEVICEADDR_USBADRA;
 		return;
 	  case 0x0900: // SET_CONFIGURATION
+		usb_flush();
+		scsi_reset();
 		usb_configuration = setup.wValue;
 		// configure all other endpoints
 		#if defined(ENDPOINT2_CONFIG)
