@@ -93,7 +93,7 @@ const char *phase_names[] = {
 
 #define SCSI_DEBUG_ALL		255
 
-#define DEBUG SCSI_DEBUG_UAS
+#define DEBUG 0//SCSI_DEBUG_UAS
 
 #define SCSI_DEBUG(level, fmt, ...)					\
 	if (DEBUG & level & SCSI_DEBUG_UAS)					\
@@ -174,7 +174,6 @@ static void scsi_setup_ports(void)
 
 static uint8_t scsi_get_data(void)
 {
-	delayNanoseconds(5);
 	return ~(GPIO6_PSR >> 16);
 }
 
@@ -197,7 +196,13 @@ static const int parity_table[256] = {
 	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
 };
 
-static __attribute__((noinline)) void scsi_set_data(uint8_t data)
+static void scsi_set_hiz(void)
+{
+	GPIO6_DR_CLEAR |= (0xff << 24);
+	digitalWriteFast(DBPO_PIN, LOW);
+}
+
+static void scsi_set_data(uint8_t data)
 {
 	GPIO6_DR_CLEAR |= ~data << 24;
 	GPIO6_DR_SET |= data << 24;
@@ -224,7 +229,7 @@ static void dump_scsi(const char *prefix)
 void scsi_reset(void)
 {
 //	dump_scsi("RESET");
-	scsi_set_data(0);
+	scsi_set_hiz();
 	digitalWriteFast(RSTO_PIN, HIGH);
         digitalWriteFast(SELO_PIN, LOW);
 	digitalWriteFast(BSYO_PIN, LOW);
@@ -296,13 +301,13 @@ static unsigned int get_cdb_len(struct scsi_xfer *xfer)
 
 static void scsi_ack_async(void)
 {
-	delayNanoseconds(100);
+//	delayNanoseconds(1);
 	digitalWriteFast(ACKO_PIN, HIGH);
-	delayNanoseconds(100);
+//	delayNanoseconds(1);
 	while(!digitalReadFast(REQI_PIN));
-	delayNanoseconds(100);
+//	delayNanoseconds(1);
 	digitalWriteFast(ACKO_PIN, LOW);
-	delayNanoseconds(100);
+//	delayNanoseconds(1);
 }
 
 static void scsi_handle_cmd(struct scsi_xfer *xfer)
@@ -322,7 +327,7 @@ static void scsi_handle_cmd(struct scsi_xfer *xfer)
 		scsi_set_data(cdb[i++]);
 		scsi_ack_async();
 	}
-	scsi_set_data(0);
+	scsi_set_hiz();
 	SCSI_DEBUG_NOH(SCSI_DEBUG_CMD, "\n");
 }
 
@@ -381,7 +386,7 @@ static void scsi_handle_msgout(struct scsi_xfer *xfer)
 		if (--msgcnt == 0)
 			break;
 	}
-	scsi_set_data(0);
+	scsi_set_hiz();
 	SCSI_DEBUG_NOH(SCSI_DEBUG_DUMP, "\n");
 }
 
@@ -416,10 +421,13 @@ static void scsi_handle_msgin(struct scsi_xfer *xfer)
 		if (digitalReadFast(REQI_PIN))
 			continue;
 
+		delayNanoseconds(5);
+
 		if (scsi_get_phase() != SCSI_PHASE_MIN)
 			break;
 
 		tmp = scsi_get_data();
+
 		SCSI_DEBUG_NOH(SCSI_DEBUG_DUMP, " %02X", tmp);
 		if (xfer->inmsgcnt < 16) {
 			*msg++ = tmp;
@@ -525,7 +533,7 @@ static void scsi_handle_data_out(struct scsi_xfer *xfer)
 	}
 	if (t)
 		usb_rx_dout_ack(t);
-	scsi_set_data(0);
+	scsi_set_hiz();
 }
 
 static void scsi_handle_data_in(struct scsi_xfer *xfer)
@@ -540,7 +548,9 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 
 		if (digitalReadFast(REQI_PIN))
 			continue;
+
 		delayNanoseconds(5);
+
 		if (scsi_get_phase() != SCSI_PHASE_DIN)
 			break;
 
@@ -572,9 +582,6 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 			scsi_tags[get_xfer_tag(xfer)].sent_read_ready = 1;
 			uas_read_ready(xfer);
 		}
-
-		if (!t)
-			t = get_frame(&tx_free_list);
 		SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: sending %d final bytes\n", get_xfer_tag(xfer), cnt);
 		tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 	}
@@ -620,9 +627,9 @@ static void scsi_handle_phase(struct scsi_xfer *xfer)
 			SCSI_DEBUG(SCSI_DEBUG_PHASE, "disconnected\n");
 			return;
 		}
-		delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
+		delayNanoseconds(5);
 	}
-//	delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
+
 	switch (phase) {
 	case SCSI_PHASE_DOUT:
 		scsi_handle_data_out(xfer);
