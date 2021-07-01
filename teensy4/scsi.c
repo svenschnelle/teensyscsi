@@ -84,18 +84,36 @@ const char *phase_names[] = {
 	"DATA OUT",
 };
 
+struct usb_msc_cbw {
+	uint32_t signature;
+	uint32_t tag;
+	uint32_t datalen;
+	uint8_t flags;
+	uint8_t lun;
+	uint8_t cbwcblen;
+	uint8_t cdb[15];
+} __attribute__((packed));
+
+struct usb_msc_csw {
+	uint32_t signature;
+	uint32_t tag;
+	uint32_t data_residue;
+	uint8_t status;
+} __attribute__((packed));
+
 #define SCSI_DEBUG_CMD		1
 #define SCSI_DEBUG_PHASE	2
 #define SCSI_DEBUG_UAS		4
-#define SCSI_DEBUG_DUMP		8
-#define SCSI_DEBUG_ERROR	16
-#define SCSI_DEBUG_PIN		32
+#define SCSI_DEBUG_MSC		8
+#define SCSI_DEBUG_DUMP		16
+#define SCSI_DEBUG_ERROR	32
+#define SCSI_DEBUG_PIN		64
 
 #define SCSI_DEBUG_ALL		255
 
-#define DEBUG 0//SCSI_DEBUG_UAS
+#define DEBUG SCSI_DEBUG_ALL
 
-#define SCSI_DEBUG(level, fmt, ...)					\
+#define SCSI_DEBUG(level, fmt, ...) do {				\
 	if (DEBUG & level & SCSI_DEBUG_UAS)					\
 		printf("%8ld.%03ld %20.20s:%-d\033[32m " fmt "\033[0m", millis() / 1000, millis() % 1000, __func__, __LINE__, ##__VA_ARGS__); \
 	else if (DEBUG & level & SCSI_DEBUG_ERROR)				\
@@ -103,7 +121,8 @@ const char *phase_names[] = {
 	else if (DEBUG & level & SCSI_DEBUG_PHASE)				\
 		printf("%8ld.%03ld %20.20s:%-d\033[36m " fmt "\033[0m", millis() / 1000, millis() % 1000, __func__, __LINE__, ##__VA_ARGS__); \
 	else if (DEBUG & level & DEBUG)						\
-		printf("%8ld.%03ld %20.20s:%-d\033[37m " fmt "\033[0m", millis() / 1000, millis() % 1000, __func__, __LINE__, ##__VA_ARGS__);
+		printf("%8ld.%03ld %20.20s:%-d\033[37m " fmt "\033[0m", millis() / 1000, millis() % 1000, __func__, __LINE__, ##__VA_ARGS__); \
+	} while(0);
 
 #define SCSI_DEBUG_NOH(level, fmt, ...)					\
 	if (level & DEBUG)						\
@@ -209,7 +228,7 @@ static void scsi_set_data(uint8_t data)
 	digitalWriteFast(DBPO_PIN, parity_table[data]);
 }
 
-static void dump_scsi(const char *prefix)
+static __attribute__((unused)) void dump_scsi(const char *prefix)
 {
 	// XX SEL BSY RST ACK REQ CD IO MSG ATN
 	SCSI_DEBUG(SCSI_DEBUG_PIN, "%s: %02X %s%s%s%s%s%s%s%s%s%s\n",
@@ -228,9 +247,8 @@ static void dump_scsi(const char *prefix)
 
 void scsi_reset(void)
 {
-//	dump_scsi("RESET");
-	scsi_set_hiz();
 	digitalWriteFast(RSTO_PIN, HIGH);
+	scsi_set_hiz();
         digitalWriteFast(SELO_PIN, LOW);
 	digitalWriteFast(BSYO_PIN, LOW);
 	digitalWriteFast(ACKO_PIN, LOW);
@@ -262,12 +280,13 @@ static int scsi_wait_bus_free(void)
 	return 0;
 }
 
-static int scsi_select(int id)
+static int scsi_select(struct scsi_xfer *xfer, int id)
 {
 	int i = 250000000 / SCSI_BUS_SETTLE_DELAY;
 
 	digitalWriteFast(SELO_PIN, HIGH);
-	digitalWriteFast(ATNO_PIN, HIGH);
+	if (xfer->outmsgcnt)
+		digitalWriteFast(ATNO_PIN, HIGH);
 	delayNanoseconds(10 * SCSI_BUS_SETTLE_DELAY);
         scsi_set_data(sctx.hostidmsk | (1 << id));
 	delayNanoseconds(10 * SCSI_BUS_SETTLE_DELAY);
@@ -282,7 +301,7 @@ static int scsi_select(int id)
 		digitalWriteFast(SELO_PIN, LOW);
 		return 1;
 	}
-
+	xfer->id = id;
         digitalWriteFast(SELO_PIN, LOW);
 	delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
 	SCSI_DEBUG(SCSI_DEBUG_PHASE, "selected target %d\n", id);
@@ -301,13 +320,9 @@ static unsigned int get_cdb_len(struct scsi_xfer *xfer)
 
 static void scsi_ack_async(void)
 {
-//	delayNanoseconds(1);
 	digitalWriteFast(ACKO_PIN, HIGH);
-//	delayNanoseconds(1);
 	while(!digitalReadFast(REQI_PIN));
-//	delayNanoseconds(1);
 	digitalWriteFast(ACKO_PIN, LOW);
-//	delayNanoseconds(1);
 }
 
 static void scsi_handle_cmd(struct scsi_xfer *xfer)
@@ -333,39 +348,10 @@ static void scsi_handle_cmd(struct scsi_xfer *xfer)
 
 static void scsi_handle_msgout(struct scsi_xfer *xfer)
 {
-	uint8_t *msg = xfer->outmsgs;
-	int msgcnt = 0;
+	SCSI_DEBUG(SCSI_DEBUG_DUMP, "%d: MOUT: (%d/%d)", get_xfer_tag(xfer),
+		   xfer->outmsgpos, xfer->outmsgcnt);
 
-	if (xfer->abortxfr) {
-		xfer->abortxfr = 0;
-		*msg++ = 6;
-		msgcnt = 1;
-	} else {
-		if (sctx.support_identify) {
-			if (sctx.support_disconnect)
-				*msg++ = 0xc0 | xfer->lun;
-			else
-				*msg++ = 0x80 | xfer->lun;
-			msgcnt++;
-		} else {
-			xfer->msgphase++;
-		}
-
-		if (sctx.support_tags) {
-			*msg++ = 0x20;
-			*msg++ = xfer->tag >> 8;
-			msgcnt += 2;
-		} else {
-			xfer->msgphase++;
-		}
-	}
-	msg = xfer->outmsgs;
-
-	xfer->msgphase = SCSI_MSG_IDENTIFY;
-
-	SCSI_DEBUG(SCSI_DEBUG_DUMP, "%d: MOUT: ", get_xfer_tag(xfer));
-
-	for(;;) {
+	while(xfer->outmsgpos < xfer->outmsgcnt) {
 		if (digitalReadFast(BSYI_PIN))
 			break;
 
@@ -375,16 +361,14 @@ static void scsi_handle_msgout(struct scsi_xfer *xfer)
 		if (scsi_get_phase() != SCSI_PHASE_MOUT)
 			break;
 
-		SCSI_DEBUG_NOH(SCSI_DEBUG_DUMP, " %02X", *msg);
-
-		if (msgcnt == 1)
+		if (xfer->outmsgpos + 1 == xfer->outmsgcnt) {
 			digitalWriteFast(ATNO_PIN, LOW);
+		}
 
-		scsi_set_data(*msg++);
+		uint8_t msg = xfer->outmsgs[xfer->outmsgpos++];
+		SCSI_DEBUG_NOH(SCSI_DEBUG_DUMP, " %02X", msg);
+		scsi_set_data(msg);
 		scsi_ack_async();
-		xfer->msgphase = SCSI_MSG_TAG;
-		if (--msgcnt == 0)
-			break;
 	}
 	scsi_set_hiz();
 	SCSI_DEBUG_NOH(SCSI_DEBUG_DUMP, "\n");
@@ -395,7 +379,7 @@ static int scsi_msg_length(const uint8_t *msg, int len)
 	switch(msg[0]) {
 	case 0x01:
 		if (len > 0)
-			return msg[1];
+			return msg[1]+2;
 		else
 			return 0;
 	case 0x20 ... 0x2f:
@@ -404,6 +388,26 @@ static int scsi_msg_length(const uint8_t *msg, int len)
 		return 1;
 	}
 	return 0;
+}
+
+static void scsi_handle_rejected_msg(struct scsi_xfer *xfer)
+{
+	int i, len = 0, pos = 0;
+	uint8_t msg;
+
+	for (i = 0; i < xfer->outmsgcnt; i++) {
+		len = scsi_msg_length(xfer->outmsgs + pos, xfer->outmsgcnt - pos);
+		if (pos + len >= xfer->outmsgpos)
+			break;
+		pos += len;
+	}
+	msg = xfer->outmsgs[pos];
+	if ((msg & ~0x47) == SCSI_MSG_IDENTIFY)
+		sctx.support_identify = 0;
+	else if (msg == SCSI_MSG_SIMPLE_TAG)
+		sctx.support_tags = 0;
+	if (len)
+		memset(xfer->outmsgs + pos, SCSI_MSG_NOP, len);
 }
 
 static void scsi_handle_msgin(struct scsi_xfer *xfer)
@@ -444,46 +448,68 @@ static void scsi_handle_msgin(struct scsi_xfer *xfer)
 		if (rem <= 0)
 			break;
 		len = scsi_msg_length(p, rem);
-		SCSI_DEBUG(SCSI_DEBUG_DUMP, "msg type %02x\n", p[0]);
 		if (!len)
 			break;
 
-		if (p[0] == SCSI_MSG_REJECT) {
-			SCSI_DEBUG(SCSI_DEBUG_ERROR, "REJECT msg phase %d\n", xfer->msgphase);
-			if (xfer->msgphase == SCSI_MSG_IDENTIFY)
-				sctx.support_disconnect = 0;
-			if (xfer->msgphase == SCSI_MSG_TAG) {
-				sctx.support_tags = 0;
-				sctx.support_disconnect = 0;
-			}
-			xfer->abortxfr = 1;
-			xfer->retry = 1;
-		}
-
-		if (p[0] == SCSI_MSG_SIMPLE_TAG)
+		switch(p[0]) {
+		case SCSI_MSG_REJECT:
+			scsi_handle_rejected_msg(xfer);
+			break;
+		case SCSI_MSG_SIMPLE_TAG:
 			xfer->tag = p[1] << 8;
+			break;
+		case SCSI_MSG_COMPLETE:
+		case SCSI_MSG_DISCONNECT:
+			xfer->disconnect_ok = 1;
+			break;
+		default:
+			break;
+		}
 		p += len;
 	}
 }
 
 extern uint16_t rx_packet_size, tx_packet_size;
 
-static void uas_read_ready(struct scsi_xfer *xfer)
+static void uas_send_read_ready(int tag)
 {
 	struct uas_response_iu *response_iu;
 	transfer_t *t = get_frame(&tx_free_list);
-	SCSI_DEBUG(SCSI_DEBUG_UAS, "%d: read ready\n", get_xfer_tag(xfer));
+	SCSI_DEBUG(SCSI_DEBUG_UAS, "%d: read ready\n", tag);
 	response_iu = transfer_buffer(t);
 	memset(response_iu, 0, sizeof(*response_iu));
 	response_iu->iu_id = IU_ID_READ_READY;
-	response_iu->tag = xfer->tag;
+	response_iu->tag = tag;
 	tx_uas_response(t, UAS_STAT_ENDPOINT, sizeof(*response_iu));
+
+}
+static void uas_read_ready(struct scsi_xfer *xfer)
+{
+
+	if (!usb_uas_interface_alt)
+		return;
+
+	if (scsi_tags[get_xfer_tag(xfer)].sent_read_ready)
+		return;
+
+	scsi_tags[get_xfer_tag(xfer)].sent_read_ready = 1;
+	uas_send_read_ready(xfer->tag);
 }
 
 static void uas_write_ready(struct scsi_xfer *xfer)
 {
 	struct uas_response_iu *response_iu;
-	transfer_t *t = get_frame(&tx_free_list);
+	transfer_t *t;
+
+	if (!usb_uas_interface_alt)
+		return;
+
+	if (scsi_tags[get_xfer_tag(xfer)].sent_write_ready)
+		return;
+
+	scsi_tags[get_xfer_tag(xfer)].sent_write_ready = 1;
+
+	t = get_frame(&tx_free_list);
 
 	SCSI_DEBUG(SCSI_DEBUG_UAS, "%d: write ready\n", get_xfer_tag(xfer));
 	response_iu = transfer_buffer(t);
@@ -506,33 +532,41 @@ static void scsi_handle_data_out(struct scsi_xfer *xfer)
 		if (digitalReadFast(REQI_PIN))
 			continue;
 
+		delayNanoseconds(5);
+
 		if (scsi_get_phase() != SCSI_PHASE_DOUT)
 			break;
 
-
 		if (!t) {
-			if (!scsi_tags[get_xfer_tag(xfer)].sent_write_ready) {
-				scsi_tags[get_xfer_tag(xfer)].sent_write_ready = 1;
-				uas_write_ready(xfer);
-			}
-
-			t = get_frame(&rx_dout_busy_list);
+			uas_write_ready(xfer);
+			if (usb_uas_interface_alt)
+				t = get_frame(&rx_dout_busy_list);
+			else
+				t = get_frame(&rx_cmd_busy_list);
 			p = transfer_buffer(t);
 			cnt = transfer_length(t);
 		}
 
 		scsi_set_data(*p++);
+		xfer->data_act++;
 		scsi_ack_async();
 
 		cnt--;
 		if (!cnt) {
-			usb_rx_dout_ack(t);
+			if (usb_uas_interface_alt)
+				usb_rx_dout_ack(t);
+			else
+				usb_rx_cmd_ack(t);
 			t = NULL;
 		}
 
 	}
-	if (t)
-		usb_rx_dout_ack(t);
+	if (t) {
+		if (usb_uas_interface_alt)
+			usb_rx_dout_ack(t);
+		else
+			usb_rx_cmd_ack(t);
+	}
 	scsi_set_hiz();
 }
 
@@ -562,12 +596,10 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 
 		*p++ = scsi_get_data();
 		cnt++;
+		xfer->data_act++;
 		if (cnt == 16384/*tx_packet_size*/) {
 			SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: sending %d bytes\n", get_xfer_tag(xfer), cnt);
-			if (!scsi_tags[get_xfer_tag(xfer)].sent_read_ready) {
-				scsi_tags[get_xfer_tag(xfer)].sent_read_ready = 1;
-				uas_read_ready(xfer);
-			}
+			uas_read_ready(xfer);
 			tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 			cnt = 0;
 			t = NULL;
@@ -578,19 +610,54 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 	}
 
 	if (cnt) {
-		if (!scsi_tags[get_xfer_tag(xfer)].sent_read_ready) {
-			scsi_tags[get_xfer_tag(xfer)].sent_read_ready = 1;
-			uas_read_ready(xfer);
-		}
+		uas_read_ready(xfer);
 		SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: sending %d final bytes\n", get_xfer_tag(xfer), cnt);
 		tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 	}
 }
 
-static void scsi_handle_status(struct scsi_xfer *xfer)
+static void uas_send_status(int status, int tag)
 {
 	struct uas_sense_iu *sense_iu;
+	transfer_t *t = get_frame(&tx_free_list);
+	sense_iu = transfer_buffer(t);
+	memset(sense_iu, 0, sizeof(*sense_iu));
+	sense_iu->iu_id = IU_ID_STATUS;
+	sense_iu->tag = tag;
+	sense_iu->status = status;
+	tx_uas_response(t, UAS_STAT_ENDPOINT, 16);
+
+}
+
+static void usb_status_hook(struct scsi_xfer *xfer, uint8_t status)
+{
+
+	struct usb_msc_csw *csw;
+
 	transfer_t *t;
+
+	if (!usb_uas_interface_alt && xfer->data_exp != xfer->data_act && status) {
+		t = get_frame(&tx_free_list);
+		tx_uas_response(t, UAS_DIN_ENDPOINT, 0);
+	}
+
+	if (usb_uas_interface_alt) {
+		uas_send_status(status, xfer->tag);
+	} else {
+		t = get_frame(&tx_free_list);
+		csw = transfer_buffer(t);
+		csw->signature = 0x55534253;
+		csw->tag = xfer->tag;
+		csw->data_residue = xfer->data_exp - xfer->data_act;
+		csw->status = status ? 1 : 0;
+		SCSI_DEBUG(SCSI_DEBUG_MSC, "data residue %ld, expected %d, actual %d\n",
+					  csw->data_residue, xfer->data_exp, xfer->data_act);
+		tx_uas_response(t, UAS_DIN_ENDPOINT, sizeof(*csw));
+	}
+}
+
+static void scsi_handle_status(struct scsi_xfer *xfer)
+{
 	uint8_t status;
 
 	for(;;) {
@@ -602,14 +669,7 @@ static void scsi_handle_status(struct scsi_xfer *xfer)
 				break;
 
 			status = scsi_get_data();
-			t = get_frame(&tx_free_list);
-			sense_iu = transfer_buffer(t);
-			memset(sense_iu, 0, sizeof(*sense_iu));
-			sense_iu->iu_id = IU_ID_STATUS;
-			sense_iu->tag = xfer->tag;
-			sense_iu->status = status;
-			tx_uas_response(t, UAS_STAT_ENDPOINT, 16);
-
+			usb_status_hook(xfer, status);
 			SCSI_DEBUG(SCSI_DEBUG_DUMP, "%d: STATUS: %02x\n", get_xfer_tag(xfer), status);
 			scsi_ack_async();
 		}
@@ -666,7 +726,7 @@ static int scsi_transfer(int id, struct scsi_xfer *xfer)
 	if (scsi_wait_bus_free())
 		return 1;
 
-	if (scsi_select(id))
+	if (scsi_select(xfer, id))
 		return 1;
 
 	while(!digitalReadFast(BSYI_PIN))
@@ -687,10 +747,66 @@ void scsi_initialize(void)
 	sctx.targetid = 0xff;
 }
 
+static void scsi_setup_msgs(struct scsi_xfer *xfer)
+{
+	uint8_t *msg = xfer->outmsgs;
+
+	xfer->outmsgcnt = 0;
+	xfer->outmsgpos = 0;
+
+	if (!sctx.support_identify)
+		return;
+
+	if (sctx.support_disconnect && sctx.support_tags)
+			*msg++ = 0xc0 | xfer->lun;
+		else
+			*msg++ = 0x80 | xfer->lun;
+	xfer->outmsgcnt++;
+
+	if (sctx.support_tags) {
+		*msg++ = 0x20;
+		*msg++ = xfer->tag >> 8;
+		xfer->outmsgcnt+=2;
+	}
+}
+
+static void do_xfer(struct scsi_xfer *xfer)
+{
+	int id;
+	do {
+		xfer->retry = 0;
+		xfer->data_act = 0;
+
+		scsi_setup_msgs(xfer);
+
+		if (sctx.targetid == 0xff) {
+			for(id = 7; id >= 0; id--) {
+				if (sctx.hostid == id)
+					continue;
+				printf("Scanning ID %d\n", id);
+				if (!scsi_transfer(id, xfer)) {
+					printf("found device at ID %d\n", id);
+					sctx.targetid = id;
+					printf("Support: Identify: %d Disconnect: %d Tags: %d\n",
+					       sctx.support_identify,
+					       sctx.support_disconnect,
+					       sctx.support_tags);
+					break;
+				}
+			}
+		} else {
+			scsi_transfer(sctx.targetid, xfer);
+		}
+	} while(xfer->retry);
+
+	if (!xfer->disconnect_ok)
+		SCSI_DEBUG(SCSI_DEBUG_ERROR, "%ld: unexpected disconnect\n", xfer->tag);
+}
+
 static void scsi_uas_request(struct uas_command_iu *iu, int len)
 {
+	char tmp[16] = { 0 };
 	struct scsi_xfer xfer = { 0 };
-	int id;
 
 	if (len < sizeof(struct uas_command_iu)) {
 		SCSI_DEBUG(SCSI_DEBUG_UAS, "%s: short request (%d bytes)\n", __func__, len);
@@ -703,34 +819,53 @@ static void scsi_uas_request(struct uas_command_iu *iu, int len)
 	       iu->cdb[5], iu->cdb[6], iu->cdb[7], iu->cdb[8], iu->cdb[9],
 	       iu->lun[0], iu->lun[1], iu->lun[2], iu->lun[3],
 	       iu->lun[4], iu->lun[5], iu->lun[6], iu->lun[7]);
+
+	if (iu->cdb[0] == 0xa0) {
+		/*
+		 * At least Windows 10 insists on the REPORT LUNS
+		 * command. As most of the devices i have are not
+		 * supporting that, fake a response which contains
+		 * a single LUN. We could of course improve the code
+		 * and figure out whether the device support it.
+		 */
+		transfer_t *t = get_frame(&tx_free_list);
+		tmp[3] = 8;
+		memcpy(transfer_buffer(t), tmp, sizeof(tmp));
+		tx_uas_response(t, UAS_DIN_ENDPOINT, sizeof(tmp));
+		uas_send_read_ready(iu->tag);
+		uas_send_status(0, iu->tag);
+		return;
+	}
+
 	xfer.cdb = iu->cdb;
 	xfer.tag = iu->tag;
 	xfer.lun = iu->lun[1];
 
 	memset(&scsi_tags[iu->tag >> 8], 0, sizeof(scsi_tags[iu->tag >> 8]));
+	do_xfer(&xfer);
+}
 
-	do {
-		xfer.retry = 0;
-		if (sctx.targetid == 0xff) {
-			for(id = 0; id < 7; id++) {
-				if (sctx.hostid == id)
-					continue;
-				printf("Scanning ID %d\n", id);
-				if (!scsi_transfer(id, &xfer)) {
-					printf("found device at ID %d\n", id);
-					sctx.targetid = id;
-					printf("Support: Identify: %d Disconnect: %d Tags: %d\n",
-					       sctx.support_disconnect,
-					       sctx.support_tags,
-					       sctx.support_identify);
-					break;
-				}
-			}
-		} else {
-			scsi_transfer(sctx.targetid, &xfer);
-		}
-	} while(xfer.retry);
-//	SCSI_DEBUG(0, "request done\n");
+static void scsi_msc_request(struct usb_msc_cbw *cbw, int len)
+{
+	struct scsi_xfer xfer = { 0 };
+
+	if (len < sizeof(struct usb_msc_cbw)) {
+		SCSI_DEBUG(SCSI_DEBUG_ERROR, "%s: short request (%d bytes)\n", __func__, len);
+		return;
+	}
+
+	SCSI_DEBUG(SCSI_DEBUG_MSC, "%ld: len %d, lun %d, cdblen %d, datalen %ld, flags %x, cdb %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		   cbw->tag, len, cbw->lun & 0xf, cbw->cbwcblen, cbw->datalen, cbw->flags,
+		   cbw->cdb[0], cbw->cdb[1], cbw->cdb[2], cbw->cdb[3], cbw->cdb[4],
+		   cbw->cdb[5], cbw->cdb[6], cbw->cdb[7], cbw->cdb[8], cbw->cdb[9]);
+	xfer.cdb = cbw->cdb;
+	xfer.tag = cbw->tag;
+	xfer.lun = cbw->lun & 0xf;
+	xfer.data_exp = cbw->datalen;
+	sctx.support_tags = 0;
+	sctx.support_disconnect = 0;
+//	memset(&scsi_tags[iu->tag >> 8], 0, sizeof(scsi_tags[iu->tag >> 8]));
+	do_xfer(&xfer);
 }
 
 static void scsi_check_reselection(void)
@@ -766,7 +901,11 @@ void usb_msc_loop(void)
 		int len = transfer_length(t);
 
 		if (len > 0) {
-			scsi_uas_request(transfer_buffer(t), len);
+			if (!usb_uas_interface_alt) {
+				scsi_msc_request(transfer_buffer(t), len);
+			} else {
+				scsi_uas_request(transfer_buffer(t), len);
+			}
 		} else {
 			SCSI_DEBUG(SCSI_DEBUG_UAS, "ZLP!\n");
 		}

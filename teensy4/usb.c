@@ -142,7 +142,6 @@ struct transfer_struct *get_frame_noblock(struct transfer_struct **list)
 void put_frame(struct transfer_struct **list, struct transfer_struct *t)
 {
 	struct transfer_struct *tmp;
-//	printf("%s: %08x\n", __func__, t);
 
 	__disable_irq();
 	if (!*list) {
@@ -160,7 +159,6 @@ void put_frame(struct transfer_struct **list, struct transfer_struct *t)
 		}
 	} while((tmp = tmp->next));
 out:
-//	dump_frames("X", *list);
 	__enable_irq();
 }
 
@@ -392,8 +390,9 @@ static void endpoint0_setup(uint64_t setupdata)
 		USB1_DEVICEADDR = USB_DEVICEADDR_USBADR(setup.wValue) | USB_DEVICEADDR_USBADRA;
 		return;
 	  case 0x0900: // SET_CONFIGURATION
-		usb_flush();
 		scsi_reset();
+		delay(10);
+		usb_flush();
 		usb_configuration = setup.wValue;
 		// configure all other endpoints
 		#if defined(ENDPOINT2_CONFIG)

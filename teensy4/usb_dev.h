@@ -41,6 +41,8 @@ extern void (*usb_timer1_callback)(void);
 extern void usb_rx_cmd_ack(transfer_t *t);
 extern void usb_rx_dout_ack(transfer_t *t);
 int tx_uas_response(transfer_t *xfer, int ep, int len);
+extern int usb_uas_interface_alt;
+
 static inline void *transfer_buffer(struct transfer_struct *t)
 {
         return (void *)(t->pointer0 & ~0xfff);

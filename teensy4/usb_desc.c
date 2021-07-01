@@ -77,7 +77,7 @@
 static uint8_t device_descriptor[] = {
         18,                                     // bLength
         1,                                      // bDescriptorType
-        0x00, 0x02,                             // bcdUSB
+        0x10, 0x02,                             // bcdUSB
 #ifdef DEVICE_CLASS
         DEVICE_CLASS,                           // bDeviceClass
 #else
@@ -1648,8 +1648,8 @@ PROGMEM const uint8_t usb_config_descriptor_480[CONFIG_DESC_SIZE] = {
     0x06, // bInterfaceSubClass
     0x50, // bInterfaceProtocol
     0,    // iInterface
-    0x07, 0x05, 0x81, 0x02, 0x00, 0x02, 0x00, // USB Bulk in (Data in pipe) EP2
-    0x07, 0x05, 0x02, 0x02, 0x00, 0x02, 0x00, // USB Bulk out (Data out Pipe) EP3
+    0x07, 0x05, 0x82, 0x02, 0x00, 0x02, 0x00, // USB Bulk in (Data in pipe) EP2
+    0x07, 0x05, 0x05, 0x02, 0x00, 0x02, 0x00, // USB Bulk out (Data out Pipe) EP3
 #endif
 
 #ifdef USB_UAS_INTERFACE
@@ -2739,12 +2739,18 @@ void usb_init_serialnumber(void)
 
 // This table provides access to all the descriptor data above.
 
+const uint8_t bos_descriptor[22] = {
+	0x05, 0x0f, 0x16, 0x00, 0x02,
+	0x07, 0x10, 0x02, 0x02, 0x02, 0x00, 0x00,
+	0x0a, 0x10, 0x03, 0x00, 0x06, 0x00, 0x01, 0x0a, 0xff, 0x07
+};
 const usb_descriptor_list_t usb_descriptor_list[] = {
 	//wValue, wIndex, address,          length
 	{0x0100, 0x0000, device_descriptor, sizeof(device_descriptor)},
 	{0x0600, 0x0000, qualifier_descriptor, sizeof(qualifier_descriptor)},
 	{0x0200, 0x0000, usb_config_descriptor_480, CONFIG_DESC_SIZE},
 	{0x0700, 0x0000, usb_config_descriptor_12, CONFIG_DESC_SIZE},
+	{0x0f00, 0x0000, bos_descriptor, sizeof(bos_descriptor)},
 #ifdef SEREMU_INTERFACE
 	{0x2200, SEREMU_INTERFACE, seremu_report_desc, sizeof(seremu_report_desc)},
 	{0x2100, SEREMU_INTERFACE, usb_config_descriptor_480+SEREMU_HID_DESC_OFFSET, 9},
