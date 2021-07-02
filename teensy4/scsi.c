@@ -46,6 +46,8 @@
 #define SCSI_ARBITRATION_DELAY 2400
 #define SCSI_BUS_SETTLE_DELAY 400
 
+#define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
+
 struct scsi_ctx {
 	unsigned int support_identify:1;
 	unsigned int support_tags:1;
@@ -56,10 +58,12 @@ struct scsi_ctx {
 	int targetid;
 } sctx;
 
-struct scsi_tag_ctx {
+struct scsi_tag {
+	uint32_t host_tag;
+	uint8_t tag;
+	int valid:1;
 	int sent_read_ready:1;
 	int sent_write_ready:1;
-	int valid:1;
 } scsi_tags[256];
 
 typedef enum {
@@ -215,6 +219,67 @@ static const int parity_table[256] = {
 	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
 };
 
+#if 0
+static struct scsi_tag *scsi_find_tag(uint32_t host_tag)
+{
+	struct scsi_tag *ret;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(scsi_tags); i++) {
+		ret = scsi_tags + i;
+		if (!(ret->valid))
+			continue;
+		if (ret->host_tag == host_tag)
+			return ret;
+	}
+	return NULL;
+}
+#endif
+
+static inline uint32_t get_xfer_tag(struct scsi_xfer *xfer)
+{
+	return xfer->tag ? xfer->tag->host_tag : -1U;
+}
+
+
+static int scsi_insert_tag(uint32_t host_tag)
+{
+	struct scsi_tag *ret;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(scsi_tags); i++) {
+		ret = scsi_tags + i;
+		if (ret->valid)
+			continue;
+		ret->host_tag = host_tag;
+		ret->tag = i;
+		ret->valid = 1;
+		return i;
+	}
+
+	return -1;
+}
+
+static struct scsi_tag *scsi_lookup_tag(int tag)
+{
+	struct scsi_tag *ret;
+
+	if (tag > ARRAY_SIZE(scsi_tags))
+		return NULL;
+
+	ret = scsi_tags + tag;
+	if (!ret->valid)
+		return NULL;
+	return ret;
+}
+
+static void scsi_free_tag(int tag)
+{
+	if (tag > ARRAY_SIZE(scsi_tags))
+		return;
+	memset(scsi_tags + tag, 0, sizeof(struct scsi_tag));
+}
+
 static void scsi_set_hiz(void)
 {
 	GPIO6_DR_CLEAR |= (0xff << 24);
@@ -329,7 +394,7 @@ static void scsi_handle_cmd(struct scsi_xfer *xfer)
 {
 	unsigned int i;
 	uint8_t *cdb = xfer->cdb;
-	SCSI_DEBUG(SCSI_DEBUG_CMD, "%d: CDB: ", get_xfer_tag(xfer));
+	SCSI_DEBUG(SCSI_DEBUG_CMD, "%lx: CDB: ", get_xfer_tag(xfer));
 	for(i = 0; i < get_cdb_len(xfer);) {
 		if (digitalReadFast(BSYI_PIN))
 			break;
@@ -348,7 +413,7 @@ static void scsi_handle_cmd(struct scsi_xfer *xfer)
 
 static void scsi_handle_msgout(struct scsi_xfer *xfer)
 {
-	SCSI_DEBUG(SCSI_DEBUG_DUMP, "%d: MOUT: (%d/%d)", get_xfer_tag(xfer),
+	SCSI_DEBUG(SCSI_DEBUG_DUMP, "%lx: MOUT: (%d/%d)", get_xfer_tag(xfer),
 		   xfer->outmsgpos, xfer->outmsgcnt);
 
 	while(xfer->outmsgpos < xfer->outmsgcnt) {
@@ -456,9 +521,19 @@ static void scsi_handle_msgin(struct scsi_xfer *xfer)
 			scsi_handle_rejected_msg(xfer);
 			break;
 		case SCSI_MSG_SIMPLE_TAG:
-			xfer->tag = p[1] << 8;
+			xfer->tag = scsi_lookup_tag(p[1]);
+			if (!xfer->tag) {
+				xfer->outmsgs[0] = SCSI_MSG_ABORT;
+				xfer->outmsgpos = 0;
+				xfer->outmsgcnt = 1;
+				digitalWriteFast(ATNO_PIN, HIGH);
+				return;
+			}
 			break;
 		case SCSI_MSG_COMPLETE:
+			scsi_free_tag(xfer->tag->tag);
+			xfer->tag = 0;
+			/* fallthrough */
 		case SCSI_MSG_DISCONNECT:
 			xfer->disconnect_ok = 1;
 			break;
@@ -475,11 +550,11 @@ static void uas_send_read_ready(int tag)
 {
 	struct uas_response_iu *response_iu;
 	transfer_t *t = get_frame(&tx_free_list);
-	SCSI_DEBUG(SCSI_DEBUG_UAS, "%d: read ready\n", tag);
+	SCSI_DEBUG(SCSI_DEBUG_UAS, "%x: read ready\n", tag);
 	response_iu = transfer_buffer(t);
 	memset(response_iu, 0, sizeof(*response_iu));
 	response_iu->iu_id = IU_ID_READ_READY;
-	response_iu->tag = tag;
+	response_iu->tag = cpu_to_be16(tag);
 	tx_uas_response(t, UAS_STAT_ENDPOINT, sizeof(*response_iu));
 
 }
@@ -489,11 +564,11 @@ static void uas_read_ready(struct scsi_xfer *xfer)
 	if (!usb_uas_interface_alt)
 		return;
 
-	if (scsi_tags[get_xfer_tag(xfer)].sent_read_ready)
+	if (!xfer->tag || xfer->tag->sent_read_ready)
 		return;
 
-	scsi_tags[get_xfer_tag(xfer)].sent_read_ready = 1;
-	uas_send_read_ready(xfer->tag);
+	xfer->tag->sent_read_ready = 1;
+	uas_send_read_ready(xfer->tag->host_tag);
 }
 
 static void uas_write_ready(struct scsi_xfer *xfer)
@@ -504,18 +579,17 @@ static void uas_write_ready(struct scsi_xfer *xfer)
 	if (!usb_uas_interface_alt)
 		return;
 
-	if (scsi_tags[get_xfer_tag(xfer)].sent_write_ready)
+	if (!xfer->tag || xfer->tag->sent_write_ready)
 		return;
 
-	scsi_tags[get_xfer_tag(xfer)].sent_write_ready = 1;
+	xfer->tag->sent_write_ready = 1;
 
 	t = get_frame(&tx_free_list);
-
-	SCSI_DEBUG(SCSI_DEBUG_UAS, "%d: write ready\n", get_xfer_tag(xfer));
+	SCSI_DEBUG(SCSI_DEBUG_UAS, "%lx: write ready\n", xfer->tag->host_tag);
 	response_iu = transfer_buffer(t);
 	memset(response_iu, 0, sizeof(*response_iu));
 	response_iu->iu_id = IU_ID_WRITE_READY;
-	response_iu->tag = xfer->tag;
+	response_iu->tag = be16_to_cpu(xfer->tag->host_tag);
 	tx_uas_response(t, UAS_STAT_ENDPOINT, sizeof(*response_iu));
 }
 
@@ -598,7 +672,7 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 		cnt++;
 		xfer->data_act++;
 		if (cnt == 16384/*tx_packet_size*/) {
-			SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: sending %d bytes\n", get_xfer_tag(xfer), cnt);
+			SCSI_DEBUG(SCSI_DEBUG_PHASE, "%lx: sending %d bytes\n", get_xfer_tag(xfer), cnt);
 			uas_read_ready(xfer);
 			tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 			cnt = 0;
@@ -611,7 +685,7 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 
 	if (cnt) {
 		uas_read_ready(xfer);
-		SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: sending %d final bytes\n", get_xfer_tag(xfer), cnt);
+		SCSI_DEBUG(SCSI_DEBUG_PHASE, "%lx: sending %d final bytes\n", get_xfer_tag(xfer), cnt);
 		tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 	}
 }
@@ -623,7 +697,7 @@ static void uas_send_status(int status, int tag)
 	sense_iu = transfer_buffer(t);
 	memset(sense_iu, 0, sizeof(*sense_iu));
 	sense_iu->iu_id = IU_ID_STATUS;
-	sense_iu->tag = tag;
+	sense_iu->tag = cpu_to_be16(tag);
 	sense_iu->status = status;
 	tx_uas_response(t, UAS_STAT_ENDPOINT, 16);
 
@@ -642,12 +716,12 @@ static void usb_status_hook(struct scsi_xfer *xfer, uint8_t status)
 	}
 
 	if (usb_uas_interface_alt) {
-		uas_send_status(status, xfer->tag);
+		uas_send_status(status, xfer->tag->host_tag);
 	} else {
 		t = get_frame(&tx_free_list);
 		csw = transfer_buffer(t);
 		csw->signature = 0x55534253;
-		csw->tag = xfer->tag;
+		csw->tag = xfer->tag->host_tag;
 		csw->data_residue = xfer->data_exp - xfer->data_act;
 		csw->status = status ? 1 : 0;
 		SCSI_DEBUG(SCSI_DEBUG_MSC, "data residue %ld, expected %d, actual %d\n",
@@ -670,7 +744,7 @@ static void scsi_handle_status(struct scsi_xfer *xfer)
 
 			status = scsi_get_data();
 			usb_status_hook(xfer, status);
-			SCSI_DEBUG(SCSI_DEBUG_DUMP, "%d: STATUS: %02x\n", get_xfer_tag(xfer), status);
+			SCSI_DEBUG(SCSI_DEBUG_DUMP, "%lx: STATUS: %02x\n", get_xfer_tag(xfer), status);
 			scsi_ack_async();
 		}
 	}
@@ -680,7 +754,7 @@ static void scsi_handle_phase(struct scsi_xfer *xfer)
 {
 	int phase = scsi_get_phase();
 
-	SCSI_DEBUG(SCSI_DEBUG_PHASE, "%d: handle %s\n", get_xfer_tag(xfer), phase_names[phase & 7]);
+	SCSI_DEBUG(SCSI_DEBUG_PHASE, "%lx: handle %s\n", get_xfer_tag(xfer), phase_names[phase & 7]);
 
 	while(digitalReadFast(REQI_PIN)) {
 		if (digitalReadFast(BSYI_PIN)) {
@@ -731,6 +805,10 @@ static int scsi_transfer(int id, struct scsi_xfer *xfer)
 
 	while(!digitalReadFast(BSYI_PIN))
 		scsi_handle_phase(xfer);
+
+	if (!xfer->disconnect_ok && xfer->tag)
+		scsi_free_tag(xfer->tag->tag);
+
 	return 0;
 }
 
@@ -765,7 +843,7 @@ static void scsi_setup_msgs(struct scsi_xfer *xfer)
 
 	if (sctx.support_tags) {
 		*msg++ = 0x20;
-		*msg++ = xfer->tag >> 8;
+		*msg++ = xfer->tag->tag;
 		xfer->outmsgcnt+=2;
 	}
 }
@@ -800,13 +878,14 @@ static void do_xfer(struct scsi_xfer *xfer)
 	} while(xfer->retry);
 
 	if (!xfer->disconnect_ok)
-		SCSI_DEBUG(SCSI_DEBUG_ERROR, "%ld: unexpected disconnect\n", xfer->tag);
+		SCSI_DEBUG(SCSI_DEBUG_ERROR, "%lx: unexpected disconnect\n", xfer->tag->host_tag);
 }
 
 static void scsi_uas_request(struct uas_command_iu *iu, int len)
 {
-	char tmp[16] = { 0 };
 	struct scsi_xfer xfer = { 0 };
+	char tmp[16] = { 0 };
+	int tag;
 
 	if (len < sizeof(struct uas_command_iu)) {
 		SCSI_DEBUG(SCSI_DEBUG_UAS, "%s: short request (%d bytes)\n", __func__, len);
@@ -838,16 +917,21 @@ static void scsi_uas_request(struct uas_command_iu *iu, int len)
 	}
 
 	xfer.cdb = iu->cdb;
-	xfer.tag = iu->tag;
 	xfer.lun = iu->lun[1];
 
-	memset(&scsi_tags[iu->tag >> 8], 0, sizeof(scsi_tags[iu->tag >> 8]));
+	tag = scsi_insert_tag(be16_to_cpu(iu->tag));
+	if (tag == -1) {
+		printf("no free tag\n"); // XXX: return error code
+		return;
+	}
+	xfer.tag = scsi_lookup_tag(tag);
 	do_xfer(&xfer);
 }
 
 static void scsi_msc_request(struct usb_msc_cbw *cbw, int len)
 {
 	struct scsi_xfer xfer = { 0 };
+	int tag;
 
 	if (len < sizeof(struct usb_msc_cbw)) {
 		SCSI_DEBUG(SCSI_DEBUG_ERROR, "%s: short request (%d bytes)\n", __func__, len);
@@ -859,18 +943,24 @@ static void scsi_msc_request(struct usb_msc_cbw *cbw, int len)
 		   cbw->cdb[0], cbw->cdb[1], cbw->cdb[2], cbw->cdb[3], cbw->cdb[4],
 		   cbw->cdb[5], cbw->cdb[6], cbw->cdb[7], cbw->cdb[8], cbw->cdb[9]);
 	xfer.cdb = cbw->cdb;
-	xfer.tag = cbw->tag;
+
+	tag = scsi_insert_tag(cbw->tag);
+	if (tag == -1) {
+		printf("no free tag\n"); // XXX: return error code
+		return;
+	}
+	xfer.tag = scsi_lookup_tag(tag);
 	xfer.lun = cbw->lun & 0xf;
 	xfer.data_exp = cbw->datalen;
 	sctx.support_tags = 0;
 	sctx.support_disconnect = 0;
-//	memset(&scsi_tags[iu->tag >> 8], 0, sizeof(scsi_tags[iu->tag >> 8]));
 	do_xfer(&xfer);
 }
 
 static void scsi_check_reselection(void)
 {
-	struct scsi_xfer xfer;
+	struct scsi_xfer xfer = { 0 };
+
 	if (!digitalReadFast(SELI_PIN) &&
 	    !digitalReadFast(IOI_PIN)) {
 		uint8_t ids = scsi_get_data();
@@ -883,6 +973,8 @@ static void scsi_check_reselection(void)
 			delayNanoseconds(SCSI_BUS_SETTLE_DELAY);
 			while(!digitalReadFast(BSYI_PIN))
 				scsi_handle_phase(&xfer);
+			if (!xfer.disconnect_ok && xfer.tag)
+				scsi_free_tag(xfer.tag->tag);
 			SCSI_DEBUG(SCSI_DEBUG_PHASE, "disconnected\n");
 		}
 	}

@@ -4,8 +4,16 @@
 #include <stdint.h>
 #define SCSI_SENSE_BUFFERSIZE 96
 
+#ifdef __LITTLE_ENDIAN
 #define cpu_to_be16(x) ((x >> 8) | ((x & 0xff) << 8))
 #define cpu_to_be32(x) (cpu_to_be16((x) >> 16) | (cpu_to_be16((x) & 0xffff) << 16))
+#else
+#define cpu_to_be16(x) (x)
+#define cpu_to_be32(x) (x)
+#endif
+
+#define be16_to_cpu cpu_to_be16
+#define be32_to_cpu cpu_to_be32
 
 struct uas_command_iu {
 	uint8_t iu_id;
@@ -48,10 +56,10 @@ typedef enum {
 } uas_iu_t;
 
 struct scsi_xfer {
+	struct scsi_tag *tag;
 	uint8_t id;
 	uint8_t *cdb;
 	uint8_t status;
-	uint32_t tag;
 	uint8_t outmsgs[16];
 	int outmsgcnt;
 	int outmsgpos;
@@ -67,15 +75,11 @@ struct scsi_xfer {
 
 #define SCSI_MSG_COMPLETE 0x00
 #define SCSI_MSG_DISCONNECT 0x04
+#define SCSI_MSG_ABORT 0x06
 #define SCSI_MSG_REJECT 0x07
 #define SCSI_MSG_NOP 0x08
 #define SCSI_MSG_SIMPLE_TAG 0x20
 #define SCSI_MSG_IDENTIFY 0x80
-
-static inline uint16_t get_xfer_tag(struct scsi_xfer *xfer)
-{
-	return (xfer->tag >> 8) | ((xfer->tag & 0xff) << 8);
-}
 
 #ifdef __cplusplus
 extern "C" {
