@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "usb_dev.h"
 #include "usb_desc.h"
+#include "wiring.h"
 #include <Arduino.h>
 
 #define BSYI_PIN 2
@@ -42,6 +43,7 @@
 #define DB0O_PIN 22
 #define DB1O_PIN 23
 
+#define LED_PIN 13
 #define SCSI_BUS_CLEAR_DELAY 800
 #define SCSI_ARBITRATION_DELAY 2400
 #define SCSI_BUS_SETTLE_DELAY 400
@@ -115,7 +117,7 @@ struct usb_msc_csw {
 
 #define SCSI_DEBUG_ALL		255
 
-#define DEBUG SCSI_DEBUG_ERROR
+#define DEBUG 0//SCSI_DEBUG_ALL
 
 #define SCSI_DEBUG(level, fmt, ...) do {				\
 	if (DEBUG & level & SCSI_DEBUG_UAS)					\
@@ -193,6 +195,8 @@ static void scsi_setup_ports(void)
 	pinMode(DB6O_PIN, OUTPUT);
 	pinMode(DB7O_PIN, OUTPUT);
 	pinMode(DBPO_PIN, OUTPUT);
+
+	pinMode(LED_PIN, OUTPUT);
 }
 
 static uint8_t scsi_get_data(void)
@@ -403,6 +407,7 @@ static void scsi_handle_cmd(struct scsi_xfer *xfer)
 			continue;
 		if (scsi_get_phase() != SCSI_PHASE_CMD)
 			break;
+
 		SCSI_DEBUG_NOH(SCSI_DEBUG_CMD, " %02X", cdb[i]);
 		scsi_set_data(cdb[i++]);
 		scsi_ack_async();
@@ -599,6 +604,8 @@ static void scsi_handle_data_out(struct scsi_xfer *xfer)
 	int cnt = 0;
 	transfer_t *t = NULL;
 
+
+
 	for(;;) {
 		if (digitalReadFast(BSYI_PIN))
 			break;
@@ -651,29 +658,26 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 	transfer_t *t = NULL;
 
 	for(;;) {
+
 		if (digitalReadFast(BSYI_PIN))
 			break;
 
 		if (digitalReadFast(REQI_PIN))
 			continue;
 
-		delayNanoseconds(5);
-
 		if (scsi_get_phase() != SCSI_PHASE_DIN)
 			break;
 
-
 		if (!t) {
+			uas_read_ready(xfer);
 			t = get_frame(&tx_free_list);
 			p = transfer_buffer(t);
 		}
-
 		*p++ = scsi_get_data();
 		cnt++;
 		xfer->data_act++;
 		if (cnt == 16384/*tx_packet_size*/) {
 			SCSI_DEBUG(SCSI_DEBUG_PHASE, "%lx: sending %d bytes\n", get_xfer_tag(xfer), cnt);
-			uas_read_ready(xfer);
 			tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 			cnt = 0;
 			t = NULL;
@@ -682,9 +686,7 @@ static void scsi_handle_data_in(struct scsi_xfer *xfer)
 
 		scsi_ack_async();
 	}
-
 	if (cnt) {
-		uas_read_ready(xfer);
 		SCSI_DEBUG(SCSI_DEBUG_PHASE, "%lx: sending %d final bytes\n", get_xfer_tag(xfer), cnt);
 		tx_uas_response(t, UAS_DIN_ENDPOINT, cnt);
 	}
@@ -763,7 +765,6 @@ static void scsi_handle_phase(struct scsi_xfer *xfer)
 		}
 		delayNanoseconds(5);
 	}
-
 	switch (phase) {
 	case SCSI_PHASE_DOUT:
 		scsi_handle_data_out(xfer);
@@ -797,19 +798,23 @@ static void scsi_handle_phase(struct scsi_xfer *xfer)
 
 static int scsi_transfer(int id, struct scsi_xfer *xfer)
 {
+	digitalWriteFast(LED_PIN, HIGH);
 	if (scsi_wait_bus_free())
-		return 1;
+		goto out;
 
 	if (scsi_select(xfer, id))
-		return 1;
+		goto out;
 
 	while(!digitalReadFast(BSYI_PIN))
 		scsi_handle_phase(xfer);
 
 	if (!xfer->disconnect_ok && xfer->tag)
 		scsi_free_tag(xfer->tag->tag);
-
+	digitalWriteFast(LED_PIN, LOW);
 	return 0;
+out:
+	digitalWriteFast(LED_PIN, LOW);
+	return 1;
 }
 
 void scsi_initialize(void)

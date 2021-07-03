@@ -35,9 +35,11 @@ transfer_t endpoint0_transfer_ack  __attribute__ ((used, aligned(32)));
 extern volatile uint8_t usb_high_speed;
 uint16_t tx_packet_size = 0;
 uint16_t rx_packet_size = 0;
-#define RX_CMD_NUM 4
-#define RX_DOUT_NUM 8
-#define TX_NUM 8
+
+#define RX_CMD_NUM 8
+#define RX_DOUT_NUM 4
+#define TX_NUM 16
+
 static transfer_t rx_cmd_transfer[RX_CMD_NUM] __attribute__ ((used, aligned(32)));
 static transfer_t rx_dout_transfer[RX_DOUT_NUM] __attribute__ ((used, aligned(32)));
 static transfer_t tx_transfer[TX_NUM] __attribute__((used, aligned(32)));
@@ -105,7 +107,6 @@ void show_tx_descs(void)
 
 void dump_frames(const char *prefix, struct transfer_struct *head)
 {
-	printf("%s: %s:", __func__, prefix);
 	do {
 		printf(" -> %x", head);
 	} while(head && (head = head->next));
@@ -115,8 +116,8 @@ void dump_frames(const char *prefix, struct transfer_struct *head)
 struct transfer_struct *get_frame(struct transfer_struct **list)
 {
 	struct transfer_struct *ret = LIST_END;
-//	printf("%s\n", __func__);
-//	dump_frames("X", *list);
+	uint32_t start = millis();
+
 	do {
 		__disable_irq();
 		if (*list != LIST_END) {
@@ -125,7 +126,6 @@ struct transfer_struct *get_frame(struct transfer_struct **list)
 		}
 		__enable_irq();
 	} while(ret == LIST_END);
-//	printf("%s: %08x\n", __func__, ret);
 	return ret;
 }
 
@@ -144,7 +144,6 @@ struct transfer_struct *get_frame_noblock(struct transfer_struct **list)
 void put_frame(struct transfer_struct **list, struct transfer_struct *t)
 {
 	struct transfer_struct *tmp;
-
 	__disable_irq();
 	if (*list == LIST_END) {
 		t->next = LIST_END;
@@ -168,6 +167,7 @@ void usb_rx_cmd_ack(struct transfer_struct *t)
 {
 	usb_prepare_transfer(t, rx_packet_size);
 	arm_dcache_delete(transfer_buffer(t), rx_packet_size);
+	arm_dcache_delete(t, sizeof(*t));
 	usb_receive(UAS_CMD_ENDPOINT, t);
 }
 
@@ -175,6 +175,7 @@ void usb_rx_dout_ack(struct transfer_struct *t)
 {
 	usb_prepare_transfer(t, rx_packet_size);
 	arm_dcache_delete(transfer_buffer(t), rx_packet_size);
+	arm_dcache_delete(t, sizeof(*t));
 	usb_receive(UAS_DOUT_ENDPOINT, t);
 }
 
@@ -183,6 +184,7 @@ int tx_uas_response(transfer_t *xfer, int ep, int len)
 	usb_prepare_transfer(xfer, len);
 	if (len)
 		arm_dcache_flush_delete(transfer_buffer(xfer), len);
+	arm_dcache_delete(xfer, sizeof(*xfer));
 	usb_transmit(ep, xfer);
 
 	uint32_t status = usb_transfer_status(xfer);
@@ -241,7 +243,7 @@ static void usb_msc_configure(void)
 		t->pointer1 = 1 * 4096 + (uint32_t)(txbuf + i);
 		t->pointer2 = 2 * 4096 + (uint32_t)(txbuf + i);
 		t->pointer3 = 3 * 4096 + (uint32_t)(txbuf + i);
-		put_frame(&tx_free_list, t);;
+		put_frame(&tx_free_list, t);
 	}
 
 	usb_config_rx(UAS_CMD_ENDPOINT, rx_packet_size, 0, rx_cmd_event); // size same 12 & 480
