@@ -58,7 +58,9 @@ extern const uint8_t usb_config_descriptor_12[];
 static uint8_t reply_buffer[8];
 int usb_uas_interface_alt;
 
-transfer_t *tx_free_list, *rx_cmd_busy_list, *rx_dout_busy_list;
+transfer_t *tx_free_list = LIST_END;
+transfer_t *rx_cmd_busy_list = LIST_END;
+transfer_t *rx_dout_busy_list = LIST_END;
 
 typedef union {
 	struct {
@@ -112,26 +114,26 @@ void dump_frames(const char *prefix, struct transfer_struct *head)
 
 struct transfer_struct *get_frame(struct transfer_struct **list)
 {
-	struct transfer_struct *ret = NULL;
+	struct transfer_struct *ret = LIST_END;
 //	printf("%s\n", __func__);
 //	dump_frames("X", *list);
 	do {
 		__disable_irq();
-		if (*list) {
+		if (*list != LIST_END) {
 			ret = *list;
 			*list = (*list)->next;
 		}
 		__enable_irq();
-	} while(!ret);
+	} while(ret == LIST_END);
 //	printf("%s: %08x\n", __func__, ret);
 	return ret;
 }
 
 struct transfer_struct *get_frame_noblock(struct transfer_struct **list)
 {
-	struct transfer_struct *ret = NULL;
+	struct transfer_struct *ret = LIST_END;
 	__disable_irq();
-	if (*list) {
+	if (*list != LIST_END) {
 		ret = *list;
 		*list = (*list)->next;
 	}
@@ -144,20 +146,20 @@ void put_frame(struct transfer_struct **list, struct transfer_struct *t)
 	struct transfer_struct *tmp;
 
 	__disable_irq();
-	if (!*list) {
-		t->next = 0;
+	if (*list == LIST_END) {
+		t->next = LIST_END;
 		*list = t;
 		goto out;
 	}
 
 	tmp = *list;
 	do {
-		if (!tmp->next) {
-			t->next = 0;
+		if (tmp->next == LIST_END) {
+			t->next = LIST_END;
 			tmp->next = t;
 			break;
 		}
-	} while((tmp = tmp->next));
+	} while((tmp = tmp->next) != LIST_END);
 out:
 	__enable_irq();
 }
@@ -213,6 +215,10 @@ static void tx_complete(transfer_t *t)
 static void usb_msc_configure(void)
 {
 	int i;
+
+	tx_free_list = LIST_END;
+	rx_dout_busy_list = LIST_END;
+	rx_cmd_busy_list = LIST_END;
 
 	if (usb_high_speed) {
 		tx_packet_size = UAS_TX_SIZE_480;

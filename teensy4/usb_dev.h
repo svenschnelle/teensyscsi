@@ -10,7 +10,7 @@ struct transfer_struct {
         uint32_t status;
         uint32_t pointer0;
         uint32_t pointer1;
-        uint32_t pointer2;
+	uint32_t pointer2;
         uint32_t pointer3;
         uint32_t pointer4;
         struct transfer_struct *callback_param;
@@ -43,6 +43,7 @@ extern void usb_rx_dout_ack(transfer_t *t);
 int tx_uas_response(transfer_t *xfer, int ep, int len);
 extern int usb_uas_interface_alt;
 
+#define LIST_END (transfer_t *)1
 static inline void *transfer_buffer(struct transfer_struct *t)
 {
         return (void *)(t->pointer0 & ~0xfff);

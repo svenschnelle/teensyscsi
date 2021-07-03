@@ -115,7 +115,7 @@ struct usb_msc_csw {
 
 #define SCSI_DEBUG_ALL		255
 
-#define DEBUG SCSI_DEBUG_ALL
+#define DEBUG SCSI_DEBUG_ERROR
 
 #define SCSI_DEBUG(level, fmt, ...) do {				\
 	if (DEBUG & level & SCSI_DEBUG_UAS)					\
@@ -911,8 +911,9 @@ static void scsi_uas_request(struct uas_command_iu *iu, int len)
 		tmp[3] = 8;
 		memcpy(transfer_buffer(t), tmp, sizeof(tmp));
 		tx_uas_response(t, UAS_DIN_ENDPOINT, sizeof(tmp));
-		uas_send_read_ready(iu->tag);
-		uas_send_status(0, iu->tag);
+		int tag = be16_to_cpu(iu->tag);
+		uas_send_read_ready(tag);
+		uas_send_status(0, tag);
 		return;
 	}
 
@@ -988,7 +989,7 @@ void usb_msc_loop(void)
 		/* check for reselection */
 		scsi_check_reselection();
 		t = get_frame_noblock(&rx_cmd_busy_list);
-		if (!t)
+		if (t == LIST_END)
 			continue;
 		int len = transfer_length(t);
 
@@ -998,10 +999,11 @@ void usb_msc_loop(void)
 			} else {
 				scsi_uas_request(transfer_buffer(t), len);
 			}
+			usb_rx_cmd_ack(t);
 		} else {
-			SCSI_DEBUG(SCSI_DEBUG_UAS, "ZLP!\n");
+			SCSI_DEBUG(SCSI_DEBUG_ERROR, "ZLP!\n");
 		}
-		usb_rx_cmd_ack(t);
+
 	}
 }
 
